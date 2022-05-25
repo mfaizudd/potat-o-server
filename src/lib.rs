@@ -1,18 +1,20 @@
-use std::{thread::{JoinHandle, self}, sync::{mpsc, Arc, Mutex}};
+use std::{
+    sync::{mpsc, Arc, Mutex},
+    thread::{self, JoinHandle},
+};
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>
+    sender: mpsc::Sender<Message>,
 }
 
 impl ThreadPool {
-
     /// Create a new thread pool
-    /// 
+    ///
     /// The count is the number of threads in the pool
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// The function will panic if the count is zero
     pub fn new(count: usize) -> ThreadPool {
         assert!(count > 0);
@@ -26,26 +28,61 @@ impl ThreadPool {
     }
 
     pub fn execute<F>(&self, f: F)
-    where F: FnOnce() + Send + 'static
+    where
+        F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
-        self.sender.send(job).unwrap();
+        self.sender.send(Message::NewJob(job)).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        println!("Sending terminate message to all worker");
+
+        for _ in &self.workers {
+            self.sender.send(Message::Terminate).unwrap();
+        }
+
+        for worker in &mut self.workers {
+            println!("Shutting down worker {}", worker.id);
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
     }
 }
 
 struct Worker {
     id: usize,
-    thread: JoinHandle<()>
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
-        Worker { id, thread: thread::spawn(move || loop {
-            let job = receiver.lock().unwrap().recv().unwrap();
-            print!("Worker {} got a job. Executing.", id);
-            job();
-        })}
+    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) -> Worker {
+        let thread = thread::spawn(move || loop {
+            let message = receiver.lock().unwrap().recv().unwrap();
+            match message {
+                Message::NewJob(job) => {
+                    println!("Worker {} got a job. Executing.", id);
+                    job();
+                }
+                Message::Terminate => {
+                    println!("Terminating worker {}", id);
+                    break;
+                },
+            }
+        });
+        Worker {
+            id,
+            thread: Some(thread),
+        }
     }
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
+
+enum Message {
+    NewJob(Job),
+    Terminate,
+}
